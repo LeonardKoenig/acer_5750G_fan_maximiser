@@ -6,6 +6,12 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+/*
+ * You must compile with -O or -O2 or similar.  The functions are  defined  as
+ * inline macros, and will not be substituted in without optimization enabled,
+ * causing unresolved references at link time.
+ */
+#include <sys/io.h>
 
 #define PROGNAME fc
 #define ERRPREF "[" STRINGIFY(PROGNAME) "]: "
@@ -29,28 +35,7 @@ int ec_intro_sequence();
  * @param filedescriptor to use
  * @return 0 on success, -1 on failure
  */
-int ec_outro_sequence(int fd);
-
-/**
- * Reads one byte from IOPORTS interface.
- *
- * @param filedescriptor to use
- * @port port / position to read from
- * @return value read on success, -1 on failure
- */
-int inb(int fd, int port);
-
-/**
- * Writes one byte to IOPORTS interface.
- *
- * *Might exit program early*.
- *
- * @param filedescriptor to use
- * @param port to write to
- * @param value to write. Must be positive.
- * @return 0 on success, -1 on failure
- */
-int outb(int fd, int port, int value);
+int ec_outro_sequence();
 
 /**
  * Waits for a bitmask to appear
@@ -64,7 +49,8 @@ int outb(int fd, int port, int value);
  * @param value to check. Must be positive.
  * @return 0 when bitmask appears, -1 if it doesn't
  */
-int wait_until_bitmask_is_value(int fd, int port, int bitmask, int value);
+int wait_until_bitmask_is_value(unsigned short port, unsigned char bitmask,
+		unsigned char value);
 
 /**
  * Prints usage.
@@ -82,7 +68,7 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	int cmd = 0;
+	unsigned char cmd = 0;
 	switch (argv[1][1]) {
 		case 'm':
 		case 'M':
@@ -102,112 +88,65 @@ int main(int argc, char *argv[])
 
 	assert(cmd == MAX || cmd == NORMAL);
 
-	int fd = 0;
-	if ((fd = ec_intro_sequence()) < 0) {
+	ioperm(0x80, 1, 1); // needed for inb_p()
+	ioperm(0x68, 5, 1);
+
+	if (ec_intro_sequence() < 0) {
 		fprintf(stderr, ERRPREF "Unable to perform intro sequence. "
 				"Cleaning up\n");
-		if (fd >= 0) ec_outro_sequence(fd);
+		ec_outro_sequence();
 		exit(1);
 	}
 
-	if (wait_until_bitmask_is_value(fd, 0x6C, 0x02, 0x00) != 0) {
+	if (wait_until_bitmask_is_value(0x6C, 0x02, 0x00) != 0) {
 		fprintf(stderr, ERRPREF "Error waiting for magic value. "
 				"Cleaning up\n");
-		if (fd >= 0) ec_outro_sequence(fd);
+		ec_outro_sequence();
 		exit(1);
 	}
 
-	if (outb(fd, 0x68, cmd) != 0) {
-		fprintf(stderr, ERRPREF "Unable to write magic command %x\n",
-				cmd);
-		if (fd >= 0) ec_outro_sequence(fd);
-		exit (1);
-	}
+	outb(cmd, 0x68);
 
-	ec_outro_sequence(fd);
+	ec_outro_sequence();
 }
 
 int ec_intro_sequence()
 {
-	int fd = open(IOPORTS, O_RDWR);
-	if (fd < 0) {
-		perror("open()");
-	}
-
-	if (wait_until_bitmask_is_value(fd, 0x6C, 0x80, 0x00) != 0) {
+	if (wait_until_bitmask_is_value(0x6C, 0x80, 0x00) != 0) {
 		return -1;
 	}
-	if (inb(fd, 0x68) == -1) return -1;
+	inb(0x68);
 
-	if (wait_until_bitmask_is_value(fd, 0x6C, 0x02, 0x00) != 0) {
+	if (wait_until_bitmask_is_value(0x6C, 0x02, 0x00) != 0) {
 		return -1;
 	}
 
-	if (outb(fd, 0x6C, 0x59) == -1) return -1;
-	return fd;
+	outb(0x59, 0x6C);
+	return 0;
 }
 
-int ec_outro_sequence(int fd)
+int ec_outro_sequence()
 {
-	if (inb(fd, 0x68) < 0) return -1;
-	if (wait_until_bitmask_is_value(fd, 0x6C, 0x02, 0x00) != 0) {
+	inb(0x68);
+	if (wait_until_bitmask_is_value(0x6C, 0x02, 0x00) != 0) {
 		return -1;
 	}
-	if (outb(fd, 0x6C, 0xFF) < 0) return -1;
-
-	if (close(fd) != 0) {
-		perror("close()");
-		return -1;
-	}
+	outb(0xFF, 0x6C);
 
 	return 0;
 }
 
-int inb(int fd, int port)
-{
-	if (lseek(fd, port, SEEK_SET) == -1) {
-		perror("lseek()");
-		return -1;
-	}
 
-	char buf;
-	if (read(fd, &buf, 1) != 1) {
-		perror("read()");
-		return -1;
-	}
-
-	return buf;
-}
-
-int outb(int fd, int port, int value)
-{
-	assert(value > 0);
-	assert(!(value > 0xff));
-
-	if (lseek(fd, port, SEEK_SET) < 0) {
-		perror("lseek()");
-		fprintf(stderr, ERRPREF "Fatal Error! Terminating\n");
-		exit(1);
-	}
-
-	if (write(fd, &value, 1) != 1) {
-		perror("write()");
-		return -1;
-	}
-
-	return 0;
-}
-
-int wait_until_bitmask_is_value(int fd, int port, int bitmask, int value)
+int wait_until_bitmask_is_value(unsigned short port, unsigned char bitmask,
+		unsigned char value)
 {
 	assert(value > 0);
 
 	for (int i = 0; i < 10000; i++) {
-		if ((inb(fd, port) & bitmask) == value) {
+		// inb_p sleeps for a short time.
+		if ((inb_p(port) & bitmask) == value) {
 			return 0;
 		}
-		//TODO: Investigate. Is this needed?
-		sleep(0);
 	}
 	fprintf(stderr, ERRPREF "Timeout waiting for mask %x with value %x on port %x\n",
 			bitmask, value, port);

@@ -1,5 +1,5 @@
 CPPFLAGS = -DNDEBUG
-CFLAGS = -std=c99 -Wall -pedantic -Wextra -Wshadow -Wconversion
+CFLAGS = -std=c99 -Wall -pedantic -Wextra -Wshadow -Wconversion -O
 
 all: fancontroller_linux
 
