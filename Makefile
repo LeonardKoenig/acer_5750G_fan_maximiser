@@ -1,7 +1,10 @@
-CPPFLAGS = -DNDEBUG
-CFLAGS = -std=c99 -Wall -pedantic -Wextra -Wshadow -Wconversion -O
+CFLAGS += -std=c99 -Wall -pedantic -Wextra -Wshadow -Wconversion -O
 
-all: fancontroller_linux
+all: fancontroller_linux ec_debug
+
+ec_debug: ec_debug.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
+
 
 fancontroller_linux: fancontroller_linux.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<

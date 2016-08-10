@@ -1,3 +1,17 @@
+/**
+ * Controls the fan on devices using a KB930 EC (or similar, like KB9012)
+ * and a not further known fan controller via the 0x68/0x6c I/O-ports
+ * interface on mentioned EC.
+ *
+ * A EC-Spec can be found here:
+ * https://reservice.pro/upload/Datasheets/kb9012qf.pdf
+ * (p. 128; pdf: 138)
+ *
+ * Description of the protocol:
+ * http://wiki.laptop.org/go/Revised_EC_Port_6C_Command_Protocol
+ *
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -10,41 +24,60 @@
  */
 #include <sys/io.h>
 
+
 #define PROGNAME fc
 #define ERRPREF "[" STRINGIFY(PROGNAME) "]: "
 #define _STRINGIFY(s) #s
 #define STRINGIFY(s) _STRINGIFY(s)
 
-#define MAX 0x77
-#define NORMAL 0x76
-#define IOPORTS "/dev/port"
+
+/* I/O ports to control EC */
+#define LPC68_CTRL_PORT 0x6c
+#define LPC68_DATA_PORT 0x68
+
+/* flags of LPC68CSR (LPC I/O 0x68/0x6C Configuration and Status Register) */
+#define FLAG_IO_BSY 0x80
+#define FLAG_IBF 0x02
+
+/* if written to LPC68_CTRL_PORT clears FLAG_IO_BSY */
+#define CLR_IO_BSY 0xff
+
+#define FAN_SET 0x59 /* we want to take over fan control */
+#define FAN_MAX 0x77 /* set fan to max */
+#define FAN_NRM 0x76 /* set fan to normal */
+
+#define MAX_TRIES 10000
 
 /**
- * Sets up IOPORTS interface.
+ * Sets up I/O 0x68/0x6c interface to EC.
+ *
+ *  - request permission
+ *  - waits until I/O-interface is not busy
  *
  * @return 0 on success
  */
 int ec_intro_sequence();
 
 /**
- * Cleans up IOPORTS.
+ * Cleans up I/O ports interface.
+ *
+ *  - clears I/O busy flag
  *
  * @return 0 on success
  */
 int ec_outro_sequence();
 
 /**
- * Waits for a bitmask to appear
+ * Waits for a specified bitmask to appear.
  *
- * Loops for some time until the given port has value for specified bitmask.
+ * Loops for some time until either condition (inb(port) & bitmask) == 0x0
+ * holds true or it times out (after MAX_TRIES tries).
  *
  * @param port to read from
  * @param bitmask to apply
- * @param value to check. Must be positive.
  * @return 0 on success
  */
-int wait_until_bitmask_is_value(unsigned short port, unsigned char bitmask,
-		unsigned char value);
+int wait_until_bitmask_is_value(unsigned short port, unsigned char bitmask);
 
 /**
  * Prints usage.
@@ -62,15 +95,15 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	unsigned char cmd = 0;
+	unsigned char fan_setting = 0;
 	switch (argv[1][1]) {
 		case 'm':
 		case 'M':
-			cmd = MAX;
+			fan_setting = FAN_MAX;
 			break;
 		case 'n':
 		case 'N':
-			cmd = NORMAL;
+			fan_setting = FAN_NRM;
 			break;
 		case 'h':
 			print_usage(stdout, argv[0]);
@@ -80,7 +113,7 @@ int main(int argc, char *argv[])
 			exit(1);
 	}
 
-	assert(cmd == MAX || cmd == NORMAL);
+	assert(fan_setting == FAN_MAX || fan_setting == FAN_NRM);
 
 	if (ec_intro_sequence() != 0) {
 		fprintf(stderr, ERRPREF "Unable to perform intro sequence. "
@@ -89,68 +122,68 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	if (wait_until_bitmask_is_value(0x6C, 0x02, 0x00) != 0) {
-		fprintf(stderr, ERRPREF "Error waiting for magic value. "
-				"Cleaning up\n");
-		ec_outro_sequence();
+	/* wait for IBF flag to be cleared */
+	if (wait_until_bitmask_is_value(LPC68_CTRL_PORT, FLAG_IBF) != 0) {
 		exit(1);
 	}
+	/* write command (set fan) */
+	outb(FAN_SET, LPC68_CTRL_PORT);
 
-	outb(cmd, 0x68);
+	if (wait_until_bitmask_is_value(LPC68_CTRL_PORT, FLAG_IBF) != 0) {
+		exit(1);
+	}
+	/* write data (fan setting: max/normal) */
+	outb(fan_setting, LPC68_DATA_PORT);
 
 	ec_outro_sequence();
 }
 
 int ec_intro_sequence()
 {
-	if (ioperm(0x80, 1, 1) != 0) { /* needed for inb_p() */
+	/* get permissions */
+	if (ioperm(FLAG_IO_BSY, 1, 1) != 0) { /* needed for inb_p() */
 		perror(__func__);
 		return -1;
 	}
-	if (ioperm(0x68, 5, 1) != 0) {
+	if (ioperm(LPC68_DATA_PORT, 5, 1) != 0) {
 		perror(__func__);
-	}
-
-	if (wait_until_bitmask_is_value(0x6C, 0x80, 0x00) != 0) {
 		return -1;
 	}
-	inb(0x68);
 
-	if (wait_until_bitmask_is_value(0x6C, 0x02, 0x00) != 0) {
+	/* wait until FLAG_IO_BSY is unset */
+	if (wait_until_bitmask_is_value(LPC68_CTRL_PORT, FLAG_IO_BSY) != 0) {
 		return -1;
 	}
-	outb(0x59, 0x6C);
 
 	return 0;
 }
 
 int ec_outro_sequence()
 {
-	inb(0x68);
-
-	if (wait_until_bitmask_is_value(0x6C, 0x02, 0x00) != 0) {
+	if (wait_until_bitmask_is_value(LPC68_CTRL_PORT, FLAG_IBF) != 0) {
 		return -1;
 	}
-	outb(0xFF, 0x6C);
+
+	/* clear I/O busy flag */
+	outb(CLR_IO_BSY, LPC68_CTRL_PORT);
 
 	return 0;
 }
 
 
-int wait_until_bitmask_is_value(unsigned short port, unsigned char bitmask,
-		unsigned char value)
+int wait_until_bitmask_is_value(unsigned short port, unsigned char bitmask)
 {
-	assert(value > 0);
-
-	for (int i = 0; i < 10000; i++) {
+	unsigned char read_value = 0;
+	for (int i = 0; i < MAX_TRIES; i++) {
 		/* inb_p sleeps for a short time. */
-		if ((inb_p(port) & bitmask) == value) {
+		read_value = inb_p(port);
+		if ((read_value & bitmask) == 0x0) {
 			return 0;
 		}
 	}
-	fprintf(stderr, ERRPREF "Timeout waiting for mask %x with value %x on"
-			"port %x\n",
-			bitmask, value, port);
+	fprintf(stderr, ERRPREF "Timeout waiting for mask %#x on port %#x\n"
+			"last read value was %#x\n",
+			bitmask, port, read_value);
 	return -1;
 }
 
